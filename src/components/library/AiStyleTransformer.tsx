@@ -116,9 +116,10 @@ const SAMPLE_PHOTOS = [
 
 export const AiStyleTransformer: React.FC<AiStyleTransformerProps> = ({ onAddAsset }) => {
   const [selectedStyleId, setSelectedStyleId] = useState<AiEffectStyle>('japanese_editorial');
-  const [currentImageSrc, setCurrentImageSrc] = useState<string>(SAMPLE_PHOTOS[0].url);
+  const [currentImageSrc, setCurrentImageSrc] = useState<string>(SAMPLE_PHOTOS[0]?.url ?? '');
   const [processedDataUrl, setProcessedDataUrl] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processError, setProcessError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'processed' | 'original'>('processed');
 
   // Sliders ajustables
@@ -128,141 +129,163 @@ export const AiStyleTransformer: React.FC<AiStyleTransformerProps> = ({ onAddAss
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const selectedConfig = AI_STYLES.find((s) => s.id === selectedStyleId) || AI_STYLES[0];
+  const selectedConfig = AI_STYLES.find((s) => s.id === selectedStyleId) ?? AI_STYLES[0]!;
 
-  // Algorithme de transformation artistique en dessin (Sobel edge + color quantizing + tone curve)
+  // Filtre local : Sobel + quantification (annulable si l’utilisateur change d’image/style)
   useEffect(() => {
     if (!currentImageSrc) return;
 
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
     setIsProcessing(true);
+    setProcessError(null);
+
     const img = new Image();
     img.crossOrigin = 'anonymous';
 
     img.onload = () => {
-      const maxDim = 500;
-      let width = img.width;
-      let height = img.height;
-      if (width > maxDim || height > maxDim) {
-        if (width > height) {
-          height = Math.round((height * maxDim) / width);
-          width = maxDim;
-        } else {
-          width = Math.round((width * maxDim) / height);
-          height = maxDim;
+      if (cancelled) return;
+
+      // Laisse le navigateur peindre l’UI avant le calcul CPU-lourd
+      timer = setTimeout(() => {
+        if (cancelled) return;
+        try {
+          const maxDim = 720;
+          let width = img.width;
+          let height = img.height;
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            } else {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+
+          const canvas = canvasRef.current || document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            setProcessError('Canvas indisponible dans ce navigateur.');
+            setIsProcessing(false);
+            return;
+          }
+
+          ctx.drawImage(img, 0, 0, width, height);
+          const imgData = ctx.getImageData(0, 0, width, height);
+          const data = imgData.data;
+
+          const gray = new Float32Array(width * height);
+          for (let i = 0; i < data.length; i += 4) {
+            gray[i / 4] = 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!;
+          }
+
+          const edges = new Uint8Array(width * height);
+          const threshold = (selectedConfig.edgeThreshold * 100) / lineIntensity;
+          const edgeWeight = selectedConfig.edgeWeight * (lineIntensity / 100);
+
+          for (let y = 1; y < height - 1; y++) {
+            for (let x = 1; x < width - 1; x++) {
+              const idx = y * width + x;
+              const gx =
+                -gray[idx - width - 1]! +
+                gray[idx - width + 1]! -
+                2 * gray[idx - 1]! +
+                2 * gray[idx + 1]! -
+                gray[idx + width - 1]! +
+                gray[idx + width + 1]!;
+
+              const gy =
+                -gray[idx - width - 1]! -
+                2 * gray[idx - width]! -
+                gray[idx - width + 1]! +
+                gray[idx + width - 1]! +
+                2 * gray[idx + width]! +
+                gray[idx + width + 1]!;
+
+              const mag = Math.sqrt(gx * gx + gy * gy);
+              edges[idx] = mag > threshold ? Math.min(255, mag * edgeWeight) : 0;
+            }
+          }
+
+          const steps = Math.max(2, Math.round((selectedConfig.colorSteps * 100) / colorSimplification));
+          const stepSize = 255 / steps;
+          const sat = selectedConfig.saturation;
+          const cont = selectedConfig.contrast;
+
+          for (let i = 0; i < data.length; i += 4) {
+            const pixIdx = i / 4;
+            let r = data[i]!;
+            let g = data[i + 1]!;
+            let b = data[i + 2]!;
+
+            r = ((r / 255 - 0.5) * cont + 0.5) * 255;
+            g = ((g / 255 - 0.5) * cont + 0.5) * 255;
+            b = ((b / 255 - 0.5) * cont + 0.5) * 255;
+
+            if (sat !== 1) {
+              const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+              r = lum + (r - lum) * sat;
+              g = lum + (g - lum) * sat;
+              b = lum + (b - lum) * sat;
+            }
+
+            r = Math.floor(r / stepSize) * stepSize;
+            g = Math.floor(g / stepSize) * stepSize;
+            b = Math.floor(b / stepSize) * stepSize;
+
+            const edge = edges[pixIdx] ?? 0;
+            if (edge > 0) {
+              const ink = edge / 255;
+              r = r * (1 - ink);
+              g = g * (1 - ink);
+              b = b * (1 - ink);
+            }
+
+            if (selectedStyleId === 'manga_shonen') {
+              const l = 0.299 * r + 0.587 * g + 0.114 * b;
+              const x = pixIdx % width;
+              const y = Math.floor(pixIdx / width);
+              const dotPattern = x % 4 === 0 && y % 4 === 0 ? 40 : 0;
+              const val = l < 100 ? 20 : l < 180 ? 140 + dotPattern : 255;
+              r = g = b = val;
+            }
+
+            data[i] = Math.max(0, Math.min(255, r));
+            data[i + 1] = Math.max(0, Math.min(255, g));
+            data[i + 2] = Math.max(0, Math.min(255, b));
+          }
+
+          if (cancelled) return;
+          ctx.putImageData(imgData, 0, 0);
+          setProcessedDataUrl(canvas.toDataURL('image/png'));
+          setIsProcessing(false);
+        } catch (err) {
+          console.error(err);
+          if (!cancelled) {
+            setProcessError('Échec du traitement de l’image.');
+            setIsProcessing(false);
+          }
         }
-      }
-
-      const canvas = canvasRef.current || document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        setIsProcessing(false);
-        return;
-      }
-
-      ctx.drawImage(img, 0, 0, width, height);
-      const imgData = ctx.getImageData(0, 0, width, height);
-      const data = imgData.data;
-
-      // 1. Convertir en niveaux de gris pour l'extraction de contours
-      const gray = new Float32Array(width * height);
-      for (let i = 0; i < data.length; i += 4) {
-        gray[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      }
-
-      // 2. Détection de contours Sobel pour le trait de dessin (Line art)
-      const edges = new Uint8Array(width * height);
-      const threshold = (selectedConfig.edgeThreshold * 100) / lineIntensity;
-      const edgeWeight = selectedConfig.edgeWeight * (lineIntensity / 100);
-
-      for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
-          const idx = y * width + x;
-          const gx =
-            -gray[idx - width - 1] +
-            gray[idx - width + 1] -
-            2 * gray[idx - 1] +
-            2 * gray[idx + 1] -
-            gray[idx + width - 1] +
-            gray[idx + width + 1];
-
-          const gy =
-            -gray[idx - width - 1] -
-            2 * gray[idx - width] -
-            gray[idx - width + 1] +
-            gray[idx + width - 1] +
-            2 * gray[idx + width] +
-            gray[idx + width + 1];
-
-          const mag = Math.sqrt(gx * gx + gy * gy);
-          edges[idx] = mag > threshold ? Math.min(255, mag * edgeWeight) : 0;
-        }
-      }
-
-      // 3. Quantification des couleurs (Aplats cartoon / cel shading)
-      const steps = Math.max(2, Math.round((selectedConfig.colorSteps * 100) / colorSimplification));
-      const stepSize = 255 / steps;
-      const sat = selectedConfig.saturation;
-      const cont = selectedConfig.contrast;
-
-      for (let i = 0; i < data.length; i += 4) {
-        const pixIdx = i / 4;
-        let r = data[i];
-        let g = data[i + 1];
-        let b = data[i + 2];
-
-        // Contraste
-        r = ((r / 255 - 0.5) * cont + 0.5) * 255;
-        g = ((g / 255 - 0.5) * cont + 0.5) * 255;
-        b = ((b / 255 - 0.5) * cont + 0.5) * 255;
-
-        // Saturation
-        if (sat !== 1) {
-          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-          r = lum + (r - lum) * sat;
-          g = lum + (g - lum) * sat;
-          b = lum + (b - lum) * sat;
-        }
-
-        // Quantification (effet aplat de peinture / dessin animé)
-        r = Math.floor(r / stepSize) * stepSize;
-        g = Math.floor(g / stepSize) * stepSize;
-        b = Math.floor(b / stepSize) * stepSize;
-
-        // Incrustation du trait noir (Ink line)
-        const edge = edges[pixIdx];
-        if (edge > 0) {
-          const ink = edge / 255;
-          r = r * (1 - ink);
-          g = g * (1 - ink);
-          b = b * (1 - ink);
-        }
-
-        // Effet spécifique Manga N&B : tramage simple
-        if (selectedStyleId === 'manga_shonen') {
-          const l = 0.299 * r + 0.587 * g + 0.114 * b;
-          const x = pixIdx % width;
-          const y = Math.floor(pixIdx / width);
-          const dotPattern = (x % 4 === 0 && y % 4 === 0) ? 40 : 0;
-          const val = l < 100 ? 20 : l < 180 ? 140 + dotPattern : 255;
-          r = g = b = val;
-        }
-
-        data[i] = Math.max(0, Math.min(255, r));
-        data[i + 1] = Math.max(0, Math.min(255, g));
-        data[i + 2] = Math.max(0, Math.min(255, b));
-      }
-
-      ctx.putImageData(imgData, 0, 0);
-      setProcessedDataUrl(canvas.toDataURL('image/png'));
-      setIsProcessing(false);
+      }, 16);
     };
 
     img.onerror = () => {
+      if (cancelled) return;
+      setProcessError('Impossible de charger l’image (réseau ou CORS).');
       setIsProcessing(false);
     };
-  }, [currentImageSrc, selectedStyleId, lineIntensity, colorSimplification]);
+
+    img.src = currentImageSrc;
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [currentImageSrc, selectedStyleId, lineIntensity, colorSimplification, selectedConfig]);
 
   const handleFileUpload = (files: FileList | null) => {
     if (!files || !files[0]) return;
@@ -280,11 +303,11 @@ export const AiStyleTransformer: React.FC<AiStyleTransformerProps> = ({ onAddAss
     if (!processedDataUrl) return;
 
     const asset: LibraryAsset = {
-      id: 'ai_art_' + Date.now(),
+      id: 'filter_art_' + Date.now(),
       title: `Dessin ${selectedConfig.label}`,
       category: 'personnages',
       style: 'editorial_manuel',
-      tags: ['ia', 'dessin', 'caricature', selectedConfig.id],
+      tags: ['filtre', 'dessin', 'caricature', selectedConfig.id],
       format: 'png',
       url: processedDataUrl,
       defaultWidth: 240,
@@ -297,10 +320,8 @@ export const AiStyleTransformer: React.FC<AiStyleTransformerProps> = ({ onAddAss
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-      {/* Hidden processing canvas */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-      {/* Titre & Bannière */}
       <div
         style={{
           padding: '0.85rem',
@@ -476,6 +497,10 @@ export const AiStyleTransformer: React.FC<AiStyleTransformerProps> = ({ onAddAss
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
               <RefreshCw size={16} className="animate-spin" /> Transformation en cours...
             </div>
+          ) : processError ? (
+            <div style={{ padding: '0.75rem', fontSize: '0.78rem', color: 'var(--danger, #EF4444)', textAlign: 'center' }}>
+              {processError}
+            </div>
           ) : viewMode === 'processed' && processedDataUrl ? (
             <img
               src={processedDataUrl}
@@ -491,7 +516,6 @@ export const AiStyleTransformer: React.FC<AiStyleTransformerProps> = ({ onAddAss
           )}
         </div>
 
-        {/* Bouton d'insertion principal */}
         <button
           onClick={handleInsertToCanvas}
           className="btn btn-primary"

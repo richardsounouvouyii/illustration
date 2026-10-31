@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import type { Project, ProjectMetadata, PageFormat } from '../types/project';
 import type { SelectedObjectProperties } from '../types/editor';
-import { storageService } from '../services/storage';
+import { storageService, StorageQuotaError } from '../services/storage';
+import { createId } from '../utils/id';
 
 interface EditorContextType {
   project: Project;
@@ -23,7 +24,7 @@ interface EditorContextType {
 
 const createDefaultProject = (): Project => ({
   metadata: {
-    id: 'proj_' + Date.now(),
+    id: createId('proj'),
     name: 'Nouvelle Illustration',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -92,7 +93,7 @@ export const EditorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const createNewProject = (name = 'Nouvelle Illustration', projFormat: PageFormat = 'a4_landscape') => {
     const newProj: Project = {
       metadata: {
-        id: 'proj_' + Date.now(),
+        id: createId('proj'),
         name,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -116,27 +117,24 @@ export const EditorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const saveCurrentProject = (): boolean => {
     try {
-      let savedOk = false;
+      let saved: Project | null = null;
       setProject((prev) => {
         const updated: Project = {
           ...prev,
           canvasJson: canvasJsonRef.current ?? prev.canvasJson
         };
-        storageService.saveProject(updated);
-        savedOk = true;
-        return {
-          ...updated,
-          metadata: {
-            ...updated.metadata,
-            updatedAt: new Date().toISOString()
-          }
-        };
+        saved = storageService.saveProject(updated);
+        return saved;
       });
       Promise.resolve().then(() => refreshRecentProjects());
-      return savedOk;
+      return saved !== null;
     } catch (e) {
       console.error(e);
-      alert('Échec de l’enregistrement. Le stockage local est peut‑être plein.');
+      const message =
+        e instanceof StorageQuotaError
+          ? e.message
+          : 'Échec de l’enregistrement. Le stockage local est peut‑être plein.';
+      alert(message);
       return false;
     }
   };

@@ -7,6 +7,7 @@ import type { LibraryAsset } from '../../types/asset';
 import type { SceneTemplate } from '../../types/scene';
 import type { CanvasLayerInfo } from '../../types/canvas';
 import { SAMPLE_ASSETS } from '../../data/sampleAssets';
+import { createId } from '../../utils/id';
 import { CanvasToolbar } from './CanvasToolbar';
 
 export interface CanvasEditorHandle {
@@ -47,7 +48,7 @@ const IMAGE_CORNER_PROPS = {
 type LayerMeta = FabricObject & { layerId?: string; layerLabel?: string };
 
 function tagObject(obj: FabricObject, label: string) {
-  const id = `layer_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const id = createId('layer');
   const meta = obj as LayerMeta;
   meta.layerId = id;
   meta.layerLabel = label;
@@ -167,11 +168,12 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, CanvasEditorProps>(
 
   const restoreHistoryAt = async (index: number) => {
     const canvas = fabricRef.current;
-    if (!canvas || index < 0 || index >= historyRef.current.length) return;
+    const snapshot = historyRef.current[index];
+    if (!canvas || !snapshot) return;
     isHistoryReplayRef.current = true;
     try {
       historyIndexRef.current = index;
-      await canvas.loadFromJSON(JSON.parse(historyRef.current[index]));
+      await canvas.loadFromJSON(JSON.parse(snapshot) as Record<string, unknown>);
       canvas.renderAll();
       setSelectedProperties(null);
       commitCanvasJson(canvas.toJSON() as Record<string, unknown>);
@@ -287,6 +289,12 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, CanvasEditorProps>(
     canvas.on('object:removed', () => {
       syncCanvasJson();
       pushHistory();
+    });
+    // Sync pendant l’édition inline du texte (pas seulement au blur)
+    canvas.on('text:changed', () => {
+      syncCanvasJson();
+      pushHistory();
+      refreshLayers();
     });
 
     // Snapshot initial vide

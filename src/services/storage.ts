@@ -3,35 +3,38 @@ import type { Project, ProjectMetadata } from '../types/project';
 const PROJECTS_STORAGE_KEY = 'studio_illustrations_projects';
 const ACTIVE_PROJECT_KEY = 'studio_illustrations_active_id';
 
+function readAllProjects(): Project[] {
+  try {
+    const data = localStorage.getItem(PROJECTS_STORAGE_KEY);
+    if (!data) return [];
+    const parsed = JSON.parse(data) as unknown;
+    return Array.isArray(parsed) ? (parsed as Project[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export class StorageQuotaError extends Error {
+  constructor(message = 'Stockage local saturé. Supprimez d’anciens projets ou allégez le canvas.') {
+    super(message);
+    this.name = 'StorageQuotaError';
+  }
+}
+
 export const storageService = {
   getProjects(): ProjectMetadata[] {
-    try {
-      const data = localStorage.getItem(PROJECTS_STORAGE_KEY);
-      if (!data) return [];
-      const parsed = JSON.parse(data) as Project[];
-      return parsed.map((p) => p.metadata);
-    } catch {
-      return [];
-    }
+    return readAllProjects().map((p) => p.metadata);
   },
 
   getProject(id: string): Project | null {
-    try {
-      const data = localStorage.getItem(PROJECTS_STORAGE_KEY);
-      if (!data) return null;
-      const projects = JSON.parse(data) as Project[];
-      return projects.find((p) => p.metadata.id === id) || null;
-    } catch {
-      return null;
-    }
+    return readAllProjects().find((p) => p.metadata.id === id) || null;
   },
 
-  saveProject(project: Project): void {
-    const data = localStorage.getItem(PROJECTS_STORAGE_KEY);
-    const projects: Project[] = data ? JSON.parse(data) : [];
+  saveProject(project: Project): Project {
+    const projects = readAllProjects();
     const index = projects.findIndex((p) => p.metadata.id === project.metadata.id);
 
-    const updatedProject = {
+    const updatedProject: Project = {
       ...project,
       metadata: {
         ...project.metadata,
@@ -45,16 +48,26 @@ export const storageService = {
       projects.unshift(updatedProject);
     }
 
-    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
-    localStorage.setItem(ACTIVE_PROJECT_KEY, updatedProject.metadata.id);
+    // Garde une limite raisonnable (évite de bloquer le quota trop vite)
+    const trimmed = projects.slice(0, 40);
+
+    try {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(trimmed));
+      localStorage.setItem(ACTIVE_PROJECT_KEY, updatedProject.metadata.id);
+    } catch {
+      throw new StorageQuotaError();
+    }
+
+    return updatedProject;
   },
 
   deleteProject(id: string): void {
     try {
-      const data = localStorage.getItem(PROJECTS_STORAGE_KEY);
-      if (!data) return;
-      const projects = (JSON.parse(data) as Project[]).filter((p) => p.metadata.id !== id);
+      const projects = readAllProjects().filter((p) => p.metadata.id !== id);
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+      if (localStorage.getItem(ACTIVE_PROJECT_KEY) === id) {
+        localStorage.removeItem(ACTIVE_PROJECT_KEY);
+      }
     } catch (e) {
       console.error('Failed to delete project:', e);
     }
